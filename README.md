@@ -1,12 +1,16 @@
-# template Loup commandline application
+# loup-cmd-xargs
 
-A GitHub template for a command-line application written in
-[Loup](https://code-craft.ai/references/loup). It includes argument parsing,
-command dispatch, a sample `hello` command, tests, a native build and a CI
-workflow.
+GNU `xargs` recreated in [Loup](https://code-craft.ai/references/loup): read
+arguments from standard input and run a command with them, with `-n`, `-L`,
+`-I`, `-d`, `-0`, `-s`, `-t`, `-r`, shell-style quotes in the input, and GNU's
+exit statuses 123–127.
 
-After creating a repository from this template, work through
-[REPOSITORY_TODOS.md](REPOSITORY_TODOS.md).
+Part of the **loup-cmd** series of example applications: classic Linux and
+Windows commands, and projects for each Loup execution mode, each in its own
+repository under [myronccai](https://github.com/myronccai?tab=repositories&q=loup-cmd).
+This one is `host.dual` Loup built as a native binary. It shows running child
+processes (`exec`, `io.proc`), splitting input with `core.shlex`, a pure
+function that plans the command lines, and mapping child exit statuses.
 
 ## Requirements
 
@@ -14,70 +18,122 @@ After creating a repository from this template, work through
 
   ```sh
   curl -fsSL https://github.com/code-craft-ai-company/loup-releases/releases/latest/download/loup-install.sh | sh
-  loup --version
   ```
 
-- `make`
-- `clang` 17 or later for native builds. Native builds are supported on Linux
-  x86-64 and arm64, and are a preview on macOS and Windows.
+- `make`, and `clang` 17 or later for the native build.
 
 ## Usage
 
 ```sh
-make run ARGS="--help"            # run from source
-make run ARGS="hello Ann --shout"
-make check                        # type-check the program
-make test                         # run the tests in tests/
-make build                        # native binary: build/myapp
-make ci                           # check, test, build and smoke-test the binary
-make clean
+make build                                        # native binary: build/xargs
+make ci                                           # check, unit tests, build, end-to-end tests
+printf 'a b c' | make run ARGS="-n 1 echo"        # run from source with loup run
 ```
 
 ```text
-$ build/myapp --help
-usage: myapp [OPTIONS] COMMAND [ARGS...]
-
-A command-line application written in Loup.
-
-Commands:
-  hello [NAME]          Print a greeting (NAME defaults to 'world')
-  help                  Show this help
-
-Options:
-  -g, --greeting TEXT   Greeting used by 'hello' (default: Hello)
-      --shout           Print the greeting in upper case
-  -v, --verbose         Print diagnostic messages to stderr
-  -h, --help            Show this help and exit
-  -V, --version         Show the version and exit
+$ printf 'a b c\nd e\n' | build/xargs
+a b c d e
+$ printf 'a b c d e\n' | build/xargs -n 2
+a b
+c d
+e
+$ echo "one 'two three' four\ five" | build/xargs printf '[%s]\n'
+[one]
+[two three]
+[four five]
+$ build/xargs -t -n 1 rm -f < files.txt
+rm -f notes.txt
+rm -f 'my file.txt'
+rm -f report.txt
+$ printf 'red\ngreen\n' | build/xargs -I{} echo 'paint it {}, {} again'
+paint it red, red again
+paint it green, green again
+$ printf 'a b\nc\nd e f\n' | build/xargs -L 2
+a b c
+d e f
+$ printf 'x,y,z' | build/xargs -d , -n 1
+x
+y
+z
+$ printf 'a b\0c\0' | build/xargs -0 printf '<%s>\n'
+<a b>
+<c>
+$ printf '1\n2\n3\n' | build/xargs -n 1 sh -c 'test $0 != 2'; echo "status $?"
+status 123
+$ echo x | build/xargs no-such-command; echo "status $?"
+xargs: no-such-command: No such file or directory
+status 127
+$ echo "it's" | build/xargs; echo "status $?"
+xargs: unmatched single quote; by default quotes are special to xargs unless you use the -0 option
+it
+status 1
 ```
 
-Exit status: `0` success, `1` runtime failure, `2` usage error.
+`xargs [OPTION]... [COMMAND [INITIAL-ARGS]...]`; the default command is
+`echo`. Options come before the command and may be bundled (`-0t`), with
+values attached (`-n2`) or separate (`-n 2`); long forms take
+`--name=VALUE`.
+
+| Option | Meaning |
+|---|---|
+| `-n N`, `--max-args=N` | at most N arguments per command line |
+| `-L N`, `--max-lines=N` | the arguments of at most N non-blank input lines per command line; a line ending in a blank continues on the next |
+| `-I R` | run the command once per input line, with R in the initial arguments replaced by the line |
+| `-d C`, `--delimiter=C` | arguments end at the character C (`\n`, `\t`, `\0`, `\xHH`, `\NNN` escapes); no quote processing |
+| `-0`, `--null` | arguments end at NUL; no quote processing |
+| `-s N`, `--max-chars=N` | at most N bytes per command line, counting each word and its NUL (default 131072) |
+| `-t`, `--verbose` | print each command line on standard error before running it |
+| `-r`, `--no-run-if-empty` | do not run the command when there are no arguments |
+| `--help`, `--version` | |
+
+`-n`, `-L` and `-I` cancel each other as in GNU xargs: the later one wins,
+with a warning.
+
+Exit status: `0` on success; `123` if any run of the command exited with
+1–125; `124` if it exited with 255; `125` if it was killed by a signal; `126`
+if it cannot be run; `127` if it is not found; `1` for a bad command line, an
+unmatched quote or a command line that cannot fit. On 124–127 xargs stops at
+once.
+
+## Differences from GNU xargs
+
+- Standard input is read whole before the first command runs (Loup 1.26.0
+  has no line-at-a-time reader), so commands start only once the input
+  ends. `-p` (prompting) is not implemented for the same reason.
+- Quotes in the input follow `core.shlex`, which applies POSIX shell rules
+  one line at a time: inside double quotes `\"` and `\\` are escapes (GNU
+  treats the backslash literally), and a backslash at the end of a line does
+  not join it to the next one.
+- `-t` quotes the words the way `core.shlex.join` does (`'it'\''s'` where
+  GNU writes `"it's"`; a newline inside single quotes rather than `$'\n'`).
+- A command's output is collected and printed when it ends, as UTF-8 text,
+  instead of going straight to the terminal.
+- The runtime cannot redirect a child's standard input, so each command runs
+  through `sh -c 'exec "$@" < /dev/null'` to get `/dev/null` as GNU xargs
+  gives it.
+- Whether the command can be run is asked of `test -x` (io.fs has no
+  `stat()`), once, before the first run.
+- A command that exits with a status from 129 to 254 is reported as killed
+  by signal (status − 128): the runtime reports signals that way.
+- `-s` above 2097152 is lowered to it without a warning.
+- Not implemented: `-a`/`--arg-file`, `-E`/`-e`, `-i`, `-l`, `-x`, `-P`,
+  `-o`, `-p`, `--show-limits`, `--process-slot-var`.
+- `--version` prints one line: `xargs (loup-cmd-xargs) 0.1.0`.
 
 ## Layout
 
 ```text
-package.lppkg            # Loup manifest
-Makefile                 # run, check, test, build, ci, clean
-source/                  # the application's Loup code
-├── main.loup            # entry point
-├── cli/                 # argument parsing, help text, command dispatch
-└── commands/            # one module per command
-tests/                   # *_test.loup files
-specs/                   # feature specs: requirements, design, tasks
-skills/loup-programmer/  # agent skill for writing Loup
+source/main.loup              # entry point
+source/appinfo.loup           # name, version, exit statuses 0, 1, 123-127
+source/cli/args.loup          # getopt-style options, -d escapes, numbers
+source/cli/usage.loup         # --help and --version text
+source/cli/app.loup           # run(): parse, warnings, run_xargs, exit status
+source/commands/input.loup    # splitting the input: core.shlex, -I lines, -0/-d
+source/commands/xargs.loup    # build_plan(), running commands, statuses
+tests/*_test.loup             # unit tests (make test)
+tests/e2e.sh                  # end-to-end tests of build/xargs (make e2e)
+specs/xargs/                  # requirements, design, tasks
 ```
 
-[AGENTS.md](AGENTS.md) has the full layout, every build and test command, and
-the steps for adding a command.
-
-## Notes on the toolchain
-
-- On Linux x86-64, `loup` is the self-hosted driver and `loup-bootstrap` is
-  Stage0. `check` and `test` use `loup-bootstrap`; on other platforms both
-  names run the same tool. The Makefile handles this.
-- Modules import each other by their path under `source/`
-  (`from cli.args import (Options);`). Tests import them the same way, which
-  is why `make test` puts `source/` on `LOUPPATH`.
-- The Wasm build (`loup-bootstrap build`) is experimental: modules that use
-  `i"..."` interpolation build but trap at run time, so this template builds
-  native binaries.
+[AGENTS.md](AGENTS.md) has every build and test command and the conventions
+for changing the code.

@@ -1,0 +1,206 @@
+@mode(host.dual)
+
+# Splitting standard input into arguments.
+#
+# - Default: blank-separated words with shell-style quoting, split one line
+#   at a time with core.shlex. A line that ends in a blank continues on the
+#   next one (this matters for -L). Blank lines carry no words.
+# - -I: each line is one argument; leading blanks are dropped and quotes are
+#   removed, but the blanks inside the line stay.
+# - -0 / -d: arguments end at the delimiter, taken literally (no quoting).
+
+from core.shlex import (split as shell_split);
+
+# The arguments read from the input, grouped into logical lines (for -L),
+# and the error that stopped reading, if any.
+pub struct Input {
+    pub var lines: list[list[string]];
+    pub var error: string;
+}
+
+# A piece of text and, when an unterminated quote was found, its kind
+# ("single" or "double") and byte offset.
+pub struct Scan {
+    pub text: string;
+    pub kind: string;
+    pub pos: int;
+}
+
+const UNMATCHED_SUFFIX: string = " quote; by default quotes are special to xargs unless you use the -0 option";
+
+# Physical lines of `text`, without their newlines; no empty last line for a
+# final newline.
+pub func physical_lines(text: string): list[string] {
+    var lines = text.split("\n");
+    if (lines.len() > 0 and lines[lines.len() - 1] == "") {
+        lines.pop();
+    }
+    return lines;
+}
+
+func is_blank(ch: string): bool {
+    return ch == " " or ch == "\t";
+}
+
+func chars_of(s: string): list[string] {
+    var out: list[string] = [];
+    for (ch in s) {
+        out.push(ch);
+    }
+    return out;
+}
+
+# Finds the first quote in `line` that is never closed, following the
+# quoting rules of core.shlex.split: its kind and byte offset, or pos -1.
+pub func unmatched_quote(line: string): Scan {
+    let chars = chars_of(line);
+    var i = 0;
+    var offset = 0;
+    var quote = "";
+    var start = -1;
+    while (i < chars.len()) {
+        let ch = chars[i];
+        var width = ch.byteLength();
+        if (quote == "'") {
+            if (ch == "'") {
+                quote = "";
+            }
+        } else if (quote == "\"") {
+            if (ch == "\"") {
+                quote = "";
+            } else if (ch == "\\" and i + 1 < chars.len()) {
+                i += 1;
+                width += chars[i].byteLength();
+            }
+        } else if (ch == "'" or ch == "\"") {
+            quote = ch;
+            start = offset;
+        } else if (ch == "\\" and i + 1 < chars.len()) {
+            i += 1;
+            width += chars[i].byteLength();
+        }
+        offset += width;
+        i += 1;
+    }
+    if (quote == "") {
+        return Scan(text = line, kind = "", pos = -1);
+    }
+    let kind = if (quote == "'") { "single" } else { "double" };
+    return Scan(text = line, kind = kind, pos = start);
+}
+
+func unmatched_message(kind: string): string {
+    return "unmatched " + kind + UNMATCHED_SUFFIX;
+}
+
+# Default input: blank-separated words with quotes, grouped into logical
+# lines. Reading stops at the first unterminated quote; the words before it
+# are kept.
+pub func read_words(text: string): Input {
+    var lines: list[list[string]] = [];
+    var current: list[string] = [];
+    for (line in physical_lines(text)) {
+        let scan = unmatched_quote(line);
+        let pos = scan.pos;
+        let usable = if (pos < 0) { line } else { line.slice(0, pos) };
+        let words = shell_split(usable);
+        for (w in words) {
+            current.push(w);
+        }
+        if (pos >= 0) {
+            if (current.len() > 0) {
+                lines.push(current);
+            }
+            return Input(lines = lines, error = unmatched_message(scan.kind));
+        }
+        # A blank line does not end a logical line; neither does a line that
+        # ends in a blank.
+        let continued = words.len() == 0 or is_blank(line.slice(line.len() - 1));
+        if (!continued and current.len() > 0) {
+            lines.push(current);
+            let none: list[string] = [];
+            current = none;
+        }
+    }
+    if (current.len() > 0) {
+        lines.push(current);
+    }
+    return Input(lines = lines, error = "");
+}
+
+# One -I argument: `line` without leading blanks and with its quotes removed
+# (core.shlex rules), keeping the blanks between words. An unterminated
+# quote gives its kind.
+pub func unquote_line(line: string): Scan {
+    let chars = chars_of(line);
+    var i = 0;
+    while (i < chars.len() and is_blank(chars[i])) {
+        i += 1;
+    }
+    var parts: list[string] = [];
+    var quote = "";
+    while (i < chars.len()) {
+        let ch = chars[i];
+        if (quote == "'") {
+            if (ch == "'") {
+                quote = "";
+            } else {
+                parts.push(ch);
+            }
+        } else if (quote == "\"") {
+            if (ch == "\"") {
+                quote = "";
+            } else if (ch == "\\" and i + 1 < chars.len() and (chars[i + 1] == "\"" or chars[i + 1] == "\\")) {
+                parts.push(chars[i + 1]);
+                i += 1;
+            } else {
+                parts.push(ch);
+            }
+        } else if (ch == "'" or ch == "\"") {
+            quote = ch;
+        } else if (ch == "\\" and i + 1 < chars.len()) {
+            parts.push(chars[i + 1]);
+            i += 1;
+        } else {
+            parts.push(ch);
+        }
+        i += 1;
+    }
+    if (quote != "") {
+        let kind = if (quote == "'") { "single" } else { "double" };
+        return Scan(text = "", kind = kind, pos = 0);
+    }
+    return Scan(text = parts.join(""), kind = "", pos = -1);
+}
+
+# -I input: one argument per line; blank lines are skipped.
+pub func read_lines(text: string): Input {
+    var lines: list[list[string]] = [];
+    for (line in physical_lines(text)) {
+        let arg = unquote_line(line);
+        if (arg.kind != "") {
+            return Input(lines = lines, error = unmatched_message(arg.kind));
+        }
+        if (arg.text != "") {
+            lines.push([arg.text]);
+        }
+    }
+    return Input(lines = lines, error = "");
+}
+
+# -0 / -d input: arguments end at `delim`; a final delimiter does not start
+# another argument. Each argument counts as a line of its own.
+pub func read_delimited(text: string, delim: string): Input {
+    var lines: list[list[string]] = [];
+    if (text.len() == 0) {
+        return Input(lines = lines, error = "");
+    }
+    var items = text.split(delim);
+    if (items.len() > 0 and items[items.len() - 1] == "") {
+        items.pop();
+    }
+    for (item in items) {
+        lines.push([item]);
+    }
+    return Input(lines = lines, error = "");
+}

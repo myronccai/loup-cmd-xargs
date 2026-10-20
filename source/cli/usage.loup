@@ -1,28 +1,39 @@
 @mode(host.dual)
 
-from appinfo import (APP_NAME, APP_VERSION, APP_SUMMARY);
-from cli.args import (DEFAULT_GREETING);
+from appinfo import (APP_NAME, APP_VERSION);
 
 pub func usage(): string {
     let lines = [
-        i"usage: {$ APP_NAME $} [OPTIONS] COMMAND [ARGS...]",
+        i"Usage: {$ APP_NAME $} [OPTION]... COMMAND [INITIAL-ARGS]...",
+        "Run COMMAND with arguments INITIAL-ARGS and more arguments read from input.",
         "",
-        APP_SUMMARY,
+        "  -0, --null                   items are separated by a null, not whitespace;",
+        "                                 disables quote and backslash processing",
+        "  -d, --delimiter=CHARACTER    items in input stream are separated by CHARACTER,",
+        "                                 not by whitespace; disables quote and backslash",
+        "                                 processing",
+        "  -I R                         replace R in INITIAL-ARGS with names read",
+        "                                 from standard input, one per line",
+        "  -L, --max-lines=MAX-LINES    use at most MAX-LINES non-blank input lines per",
+        "                                 command line",
+        "  -n, --max-args=MAX-ARGS      use at most MAX-ARGS arguments per command line",
+        "  -r, --no-run-if-empty        if there are no arguments, then do not run COMMAND",
+        "  -s, --max-chars=MAX-CHARS    limit length of command line to MAX-CHARS",
+        "  -t, --verbose                print commands before executing them",
+        "      --help                   display this help and exit",
+        "      --version                output version information and exit",
         "",
-        "Commands:",
-        "  hello [NAME]          Print a greeting (NAME defaults to 'world')",
-        "  help                  Show this help",
+        "The default COMMAND is echo. Input items are separated by blanks and",
+        "newlines and may be quoted with '...' or \"...\" or escaped with \\.",
         "",
-        "Options:",
-        i"  -g, --greeting TEXT   Greeting used by 'hello' (default: {$ DEFAULT_GREETING $})",
-        "      --shout           Print the greeting in upper case",
-        "  -v, --verbose         Print diagnostic messages to stderr",
-        "  -h, --help            Show this help and exit",
-        "  -V, --version         Show the version and exit",
+        "Exit status: 0 on success; 123 if any invocation of COMMAND exited with",
+        "status 1-125; 124 if COMMAND exited with status 255; 125 if COMMAND was",
+        "killed by a signal; 126 if COMMAND cannot be run; 127 if COMMAND is not",
+        "found; 1 for other errors.",
     ];
     return lines.join("\n");
 }
 
 pub func version_line(): string {
-    return i"{$ APP_NAME $} {$ APP_VERSION $}";
+    return i"{$ APP_NAME $} (loup-cmd-{$ APP_NAME $}) {$ APP_VERSION $}";
 }

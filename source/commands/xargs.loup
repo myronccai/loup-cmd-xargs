@@ -1,0 +1,290 @@
+@mode(host.dual)
+
+# xargs: reads arguments from standard input, groups them into command lines
+# (`build_plan`, a pure function), and runs each command line in turn,
+# mapping the children's exit statuses to GNU xargs' own.
+
+from appinfo import (EXIT_OK, EXIT_FAILURE, EXIT_CHILD_FAILED, EXIT_CHILD_255,
+    EXIT_CHILD_SIGNAL, EXIT_CANNOT_RUN, EXIT_NOT_FOUND);
+from cli.args import (Options);
+from commands.input import (Input, read_words, read_lines, read_delimited);
+from core.shlex import (join as shell_join);
+from io.fs import (isFile, isDir, exists);
+from io.proc import (exitCode);
+
+# The command lines to run and the error that cut the list short, if any.
+pub struct Plan {
+    pub var commands: list[list[string]];
+    pub var error: string;
+}
+
+# The command given on the command line, or `echo`.
+pub func base_command(opts: Options): list[string] {
+    if (opts.command.len() == 0) {
+        return ["echo"];
+    }
+    return opts.command;
+}
+
+# The size a command line counts against -s: each word and its terminating
+# NUL, in bytes.
+pub func line_size(argv: list[string]): int {
+    var size = 0;
+    for (w in argv) {
+        size += w.byteLength() + 1;
+    }
+    return size;
+}
+
+# Replaces every occurrence of `target` in `word` with `value`.
+pub func replace_all(word: string, target: string, value: string): string {
+    if (target == "" or word.index_of(target) < 0) {
+        return word;
+    }
+    var parts: list[string] = [];
+    var rest = word;
+    var at = rest.index_of(target);
+    while (at >= 0) {
+        parts.push(rest.slice(0, at));
+        parts.push(value);
+        rest = rest.slice(at + target.len());
+        at = rest.index_of(target);
+    }
+    parts.push(rest);
+    return parts.join("");
+}
+
+# Reads the input as the options say.
+pub func read_input(opts: Options, text: string): Input {
+    if (opts.delimited) {
+        return read_delimited(text, opts.delimiter);
+    }
+    if (opts.replace) {
+        return read_lines(text);
+    }
+    return read_words(text);
+}
+
+func copy_words(words: list[string]): list[string] {
+    var out: list[string] = [];
+    for (w in words) {
+        out.push(w);
+    }
+    return out;
+}
+
+# Groups the input into command lines:
+#   -I: one command per input line, the replacement string substituted in
+#       the initial arguments;
+#   -L N: the arguments of N lines per command;
+#   -n N: at most N arguments per command;
+# and never more than -s bytes per command line.
+pub func build_plan(opts: Options, input: Input): Plan {
+    let base = base_command(opts);
+    var commands: list[list[string]] = [];
+    let base_size = line_size(base);
+    if (base_size > opts.max_chars) {
+        return Plan(commands = commands, error = "cannot fit single argument within argument list size limit");
+    }
+
+    if (opts.replace) {
+        for (line in input.lines) {
+            # The command name itself is not replaced, only its arguments.
+            var argv = [base[0]];
+            for (w in base.slice(1)) {
+                argv.push(replace_all(w, opts.replace_str, line[0]));
+            }
+            if (line_size(argv) > opts.max_chars) {
+                return Plan(commands = commands, error = "argument line too long");
+            }
+            commands.push(argv);
+        }
+        return Plan(commands = commands, error = "");
+    }
+
+    var total = 0;
+    for (line in input.lines) {
+        total += line.len();
+    }
+    if (total == 0) {
+        # Like GNU xargs, run the command once without arguments, unless -r
+        # was given or reading the input failed.
+        if (!opts.no_run_if_empty and input.error == "") {
+            commands.push(copy_words(base));
+        }
+        return Plan(commands = commands, error = "");
+    }
+
+    var current = copy_words(base);
+    var size = base_size;
+    var args = 0;
+    var lines = 0;
+    for (line in input.lines) {
+        for (item in line) {
+            let item_size = item.byteLength() + 1;
+            if (size + item_size > opts.max_chars) {
+                if (args == 0) {
+                    return Plan(commands = commands, error = "argument line too long");
+                }
+                commands.push(current);
+                current = copy_words(base);
+                size = base_size;
+                args = 0;
+                lines = 0;
+                if (size + item_size > opts.max_chars) {
+                    return Plan(commands = commands, error = "argument line too long");
+                }
+            }
+            current.push(item);
+            size += item_size;
+            args += 1;
+            if (opts.max_args > 0 and args == opts.max_args) {
+                commands.push(current);
+                current = copy_words(base);
+                size = base_size;
+                args = 0;
+            }
+        }
+        lines += 1;
+        if (opts.max_lines > 0 and lines == opts.max_lines and args > 0) {
+            commands.push(current);
+            current = copy_words(base);
+            size = base_size;
+            args = 0;
+            lines = 0;
+        }
+    }
+    if (args > 0) {
+        commands.push(current);
+    }
+    return Plan(commands = commands, error = "");
+}
+
+# Where `command` is: itself if it has a slash and exists, else the first
+# file of that name in a directory on PATH; "" when it is not found.
+pub func locate(command: string): string {
+    if (command.index_of("/") >= 0) {
+        return if (exists(command)) { command } else { "" };
+    }
+    let path = env("PATH") ?? "/usr/local/bin:/usr/bin:/bin";
+    for (dir in path.split(":")) {
+        let d = if (dir == "") { "." } else { dir };
+        let candidate = d + "/" + command;
+        if (isFile(candidate)) {
+            return candidate;
+        }
+    }
+    return "";
+}
+
+func fail_to_run(command: string, reason: string, status: int): int {
+    printErr("xargs: " + command + ": " + reason);
+    return status;
+}
+
+# Whether `command` can be run: 0, or the status xargs stops with when it is
+# not found (127) or cannot be executed (126). io.fs cannot read the exec
+# bit (no stat()), so `test -x` is asked.
+pub func check_runnable(command: string): int {
+    let path = locate(command);
+    if (path == "") {
+        return fail_to_run(command, "No such file or directory", EXIT_NOT_FOUND);
+    }
+    if (isDir(path) or exitCode(["test", "-x", path]) != 0) {
+        return fail_to_run(command, "Permission denied", EXIT_CANNOT_RUN);
+    }
+    return EXIT_OK;
+}
+
+# The command line that runs `argv` with standard input from /dev/null, as
+# GNU xargs does (the runtime has no way to redirect a child's input, so a
+# shell does it and then replaces itself with the command).
+pub func with_null_stdin(argv: list[string]): list[string] {
+    var wrapped = ["sh", "-c", "exec \"$@\" < /dev/null", "sh"];
+    for (w in argv) {
+        wrapped.push(w);
+    }
+    return wrapped;
+}
+
+# Runs one command line, passing on its output. Returns 0 when it succeeded,
+# EXIT_CHILD_FAILED when it exited with 1-125 (xargs goes on), or the status
+# xargs stops with: 124 (exit 255) or 125 (killed by a signal).
+pub func run_command(argv: list[string]): int {
+    let r = exec(with_null_stdin(argv));
+    let code: int = r.exit_code;
+    let out = r.stdout.to_string();
+    var err = r.stderr.to_string();
+    if (out.len() > 0) {
+        print(out);
+    }
+    if (err.endsWith("\n")) {
+        err = err.slice(0, err.len() - 1);
+    }
+    if (err.len() > 0) {
+        printErr(err);
+    }
+    if (code == 255) {
+        return fail_to_run(argv[0], "exited with status 255; aborting", EXIT_CHILD_255);
+    }
+    if (code > 128 and code < 255) {
+        # The runtime reports death by signal N as 128 + N.
+        return fail_to_run(argv[0], i"terminated by signal {$ code - 128 $}", EXIT_CHILD_SIGNAL);
+    }
+    if (code != 0) {
+        return EXIT_CHILD_FAILED;
+    }
+    return EXIT_OK;
+}
+
+# Runs the planned command lines in order (printing each first with -t).
+# Returns the final status.
+pub func run_plan(plan: Plan, verbose: bool): int {
+    var failed = false;
+    var checked = false;
+    for (argv in plan.commands) {
+        if (verbose) {
+            printErr(shell_join(argv));
+        }
+        # Every command line runs the same command: check it once.
+        if (!checked) {
+            let runnable = check_runnable(argv[0]);
+            if (runnable != EXIT_OK) {
+                return runnable;
+            }
+            checked = true;
+        }
+        let status = run_command(argv);
+        if (status == EXIT_CHILD_FAILED) {
+            failed = true;
+        } else if (status != EXIT_OK) {
+            return status;
+        }
+    }
+    if (failed) {
+        return EXIT_CHILD_FAILED;
+    }
+    return EXIT_OK;
+}
+
+pub func run_xargs(opts: Options): int {
+    let input = read_input(opts, readText("/dev/stdin"));
+    let plan = build_plan(opts, input);
+    var status = EXIT_OK;
+    if (input.error != "") {
+        printErr("xargs: " + input.error);
+        status = EXIT_FAILURE;
+    }
+    if (plan.error != "") {
+        printErr("xargs: " + plan.error);
+        status = EXIT_FAILURE;
+    }
+    let ran = run_plan(plan, opts.verbose);
+    if (ran != EXIT_OK and ran != EXIT_CHILD_FAILED) {
+        return ran;
+    }
+    if (status != EXIT_OK) {
+        return status;
+    }
+    return ran;
+}

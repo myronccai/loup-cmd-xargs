@@ -4,7 +4,7 @@
 # Stage0; `check` and `test` need Stage0 there. On macOS, Windows and Linux
 # arm64 both names run Stage0, so these targets work unchanged.
 
-APP            ?= myapp
+APP            ?= xargs
 LOUP           ?= loup
 LOUP_BOOTSTRAP ?= loup-bootstrap
 BUILD_DIR      ?= build
@@ -13,13 +13,16 @@ SOURCES        := package.lppkg $(shell find source -name '*.loup')
 ARGS           ?=
 TEST_ARGS      ?=
 
-.PHONY: all run check test build ci clean
+.PHONY: all run check test build e2e ci clean
 
 all: build
 
-# Run from source, e.g. `make run ARGS="hello Ann --shout"`.
+# Run from source, e.g. `printf 'a b c' | make run ARGS="-n 1 echo"`. This
+# uses Stage0: the self-hosted `loup run` joins a child's argv into a shell
+# command without quoting it, which breaks the `sh -c '...'` xargs runs
+# commands through.
 run:
-	$(LOUP) run source/main.loup -- $(ARGS)
+	$(LOUP_BOOTSTRAP) run source/main.loup -- $(ARGS)
 
 # Type-check source/main.loup and every module it imports.
 check:
@@ -38,8 +41,13 @@ $(BIN): $(SOURCES)
 	@mkdir -p $(BUILD_DIR)
 	$(LOUP) build --target native -o $@
 
+# End-to-end tests: run the built binary and compare its output and exit
+# status with the expected ones.
+e2e: $(BIN)
+	bash tests/e2e.sh $(BIN)
+
 # Everything CI runs, ending with a smoke test of the built binary.
-ci: check test build
+ci: check test build e2e
 	$(BIN) --version
 
 clean:

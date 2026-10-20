@@ -3,11 +3,22 @@
 # Application identity. Keep APP_NAME and APP_VERSION in step with `name`
 # and `version` in package.lppkg.
 
-pub const APP_NAME: string = "myapp";
+pub const APP_NAME: string = "xargs";
 pub const APP_VERSION: string = "0.1.0";
-pub const APP_SUMMARY: string = "A command-line application written in Loup.";
+pub const APP_SUMMARY: string = "Build and run command lines from standard input (a Loup recreation of GNU xargs).";
 
-# Exit statuses returned by main().
+# Exit statuses, as GNU xargs uses them.
 pub const EXIT_OK: int = 0;
+# A bad command line, unreadable input or an argument line that is too long.
 pub const EXIT_FAILURE: int = 1;
-pub const EXIT_USAGE: int = 2;
+pub const EXIT_USAGE: int = 1;
+# Some invocation of the command exited with a status from 1 to 125.
+pub const EXIT_CHILD_FAILED: int = 123;
+# The command exited with status 255.
+pub const EXIT_CHILD_255: int = 124;
+# The command was killed by a signal.
+pub const EXIT_CHILD_SIGNAL: int = 125;
+# The command was found but could not be run.
+pub const EXIT_CANNOT_RUN: int = 126;
+# The command was not found.
+pub const EXIT_NOT_FOUND: int = 127;

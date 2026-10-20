@@ -1,0 +1,82 @@
+@mode(host.dual)
+
+from debug.assert import (expect, expectEq);
+from cli.args import (Options, parse_args);
+from commands.input import (Input);
+from commands.xargs import (Plan, build_plan, read_input, line_size, replace_all, base_command, locate,
+    with_null_stdin);
+
+# The command lines xargs would run for `args` and `text`, one per entry.
+func plan_for(args: list[string], text: string): Plan {
+    let opts = parse_args(args).unwrap();
+    return build_plan(opts, read_input(opts, text));
+}
+
+func shown(plan: Plan): string {
+    var out: list[string] = [];
+    for (argv in plan.commands) {
+        out.push(argv.join(" "));
+    }
+    return out.join(" | ");
+}
+
+func test_default_echo(): void {
+    let none: list[string] = [];
+    expectEq(shown(plan_for(none, "a b\nc\n")), "echo a b c", "one echo");
+    expectEq(base_command(parse_args(none).unwrap()).join(" "), "echo", "default command");
+}
+
+func test_empty_input(): void {
+    let none: list[string] = [];
+    expectEq(shown(plan_for(none, "")), "echo", "runs once without arguments");
+    expectEq(plan_for(["-r"], "").commands.len(), 0, "-r runs nothing");
+    expectEq(plan_for(["-I", "{}", "echo"], "").commands.len(), 0, "-I runs nothing");
+    expectEq(plan_for(["echo"], "'x").commands.len(), 0, "nothing runs after a bad first line");
+}
+
+func test_max_args(): void {
+    expectEq(shown(plan_for(["-n", "2", "rm"], "a b c d e")), "rm a b | rm c d | rm e", "-n 2");
+}
+
+func test_max_lines(): void {
+    expectEq(shown(plan_for(["-L", "1"], "a b\nc\nd e f\n")), "echo a b | echo c | echo d e f", "-L 1");
+    expectEq(shown(plan_for(["-L", "2"], "a\nb\nc\n")), "echo a b | echo c", "-L 2");
+    expectEq(shown(plan_for(["-L", "1"], "a \nb\nc\n")), "echo a b | echo c", "trailing blank joins lines");
+}
+
+func test_replace(): void {
+    expectEq(shown(plan_for(["-I", "{}", "mv", "{}", "{}.bak"], "x\n y z\n")),
+        "mv x x.bak | mv y z y z.bak", "one command per line");
+    expectEq(shown(plan_for(["-I", "{}", "{}", "{}"], "x\n")), "{} x", "the command name is not replaced");
+    expectEq(replace_all("a%b%", "%", "X"), "aXbX", "every occurrence");
+    expectEq(replace_all("abc", "", "X"), "abc", "empty target");
+}
+
+func test_size_limit(): void {
+    expectEq(line_size(["echo", "ab"]), 8, "words and NULs");
+    expectEq(shown(plan_for(["-s", "12", "echo"], "a b c d")), "echo a b c | echo d", "split by size");
+    let too_long = plan_for(["-s", "12", "echo"], "a b aaaaaaaaaaaaaa");
+    expectEq(shown(too_long), "echo a b", "earlier arguments still run");
+    expectEq(too_long.error, "argument line too long", "error");
+    expectEq(plan_for(["-s", "3", "echo"], "a").error,
+        "cannot fit single argument within argument list size limit", "command alone too long");
+}
+
+func test_delimited_plan(): void {
+    let nul = str(char.of(0));
+    expectEq(plan_for(["-0", "touch"], "a b" + nul + "c" + nul).commands[0][1], "a b", "NUL keeps blanks");
+    expectEq(shown(plan_for(["-d", ",", "-n", "1"], "x,y")), "echo x | echo y", "-d");
+}
+
+func test_locate(): void {
+    expectEq(locate("no-such-command-zz"), "", "not on PATH");
+    expectEq(locate("./no/such"), "", "missing path");
+    expect(locate("tests/xargs_test.loup") == "tests/xargs_test.loup", "path with a slash");
+}
+
+func test_null_stdin_wrapper(): void {
+    let wrapped = with_null_stdin(["printf", "%s", "a b"]);
+    expectEq(wrapped.len(), 7, "sh -c SCRIPT sh ARGV...");
+    expectEq(wrapped[2], "exec \"$@\" < /dev/null", "script");
+    expectEq(wrapped[6], "a b", "arguments passed unchanged");
+}

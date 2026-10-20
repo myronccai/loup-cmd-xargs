@@ -1,0 +1,61 @@
+@mode(host.dual)
+
+from debug.assert import (expect, expectEq);
+from commands.input import (Input, read_words, read_lines, read_delimited, unmatched_quote,
+    unquote_line, physical_lines);
+
+func flat(input: Input): string {
+    var parts: list[string] = [];
+    for (line in input.lines) {
+        parts.push(line.join("|"));
+    }
+    return parts.join(" / ");
+}
+
+func test_physical_lines(): void {
+    expectEq(physical_lines("a\nb\n").len(), 2, "final newline");
+    expectEq(physical_lines("a\nb").len(), 2, "no final newline");
+    expectEq(physical_lines("").len(), 0, "empty");
+}
+
+func test_words_and_lines(): void {
+    expectEq(flat(read_words("a b\n  c\td \n\ne\n")), "a|b / c|d|e", "blank lines skipped, trailing blank continues");
+    expectEq(read_words("").lines.len(), 0, "no input");
+    expectEq(read_words("  \n\t\n").lines.len(), 0, "only blanks");
+}
+
+func test_quotes(): void {
+    expectEq(flat(read_words("'a  b' \"c d\" e\\ f\n")), "a  b|c d|e f", "quotes and backslash");
+    expectEq(flat(read_words("x'y z'w\n")), "xy zw", "quotes inside a word");
+    expectEq(flat(read_words("\"a\\\"b\"\n")), "a\"b", "escaped quote inside double quotes (core.shlex)");
+    expectEq(flat(read_words("''\n")), "", "empty quoted word");
+}
+
+func test_unmatched_quote(): void {
+    let scan = unmatched_quote("a 'b");
+    expectEq(scan.pos, 2, "position");
+    expectEq(scan.kind, "single", "kind");
+    expectEq(unmatched_quote("\"x 'y\"").pos, -1, "single quote inside double quotes");
+    expectEq(unmatched_quote("a\\'b").pos, -1, "escaped quote");
+    let input = read_words("a\nb \"c\nd\n");
+    expectEq(flat(input), "a / b", "words before the error are kept");
+    expectEq(input.error,
+        "unmatched double quote; by default quotes are special to xargs unless you use the -0 option", "message");
+}
+
+func test_replace_lines(): void {
+    expectEq(flat(read_lines("  a  b \n\n c\n")), "a  b  / c", "leading blanks dropped, inner kept");
+    expectEq(unquote_line("'a  b'  c").text, "a  b  c", "quotes removed, blanks kept");
+    expectEq(unquote_line("x\\ y").text, "x y", "backslash");
+    expectEq(unquote_line("'open").kind, "single", "unterminated");
+    expectEq(read_lines("ok\n\"bad\n").lines.len(), 1, "lines before the error");
+}
+
+func test_delimited(): void {
+    let nul = str(char.of(0));
+    expectEq(flat(read_delimited("a" + nul + "b c" + nul, nul)), "a / b c", "NUL separated");
+    expectEq(flat(read_delimited("a::b:", ":")), "a /  / b", "empty item kept, final delimiter ends");
+    expectEq(flat(read_delimited("a:b\n", ":")), "a / b\n", "newline is data");
+    expectEq(read_delimited("", ":").lines.len(), 0, "empty input");
+    expect(read_delimited("'x", ":").error == "", "no quoting");
+}

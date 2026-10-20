@@ -1,98 +1,257 @@
 @mode(host.dual)
 
-# Command-line parsing. Loup 1.26 has no CLI library, so arguments are
-# parsed by hand into an Options value.
+# Command-line parsing for xargs:
 #
-# Grammar: [OPTIONS] COMMAND [OPERANDS...]
-#   Options may appear anywhere before `--`; everything after `--` is an
-#   operand. Value options accept `--name VALUE` and `--name=VALUE`.
+#   xargs [OPTION]... [COMMAND [INITIAL-ARGS]...]
+#
+# Options come first, getopt style: short options may be bundled (`-0t`),
+# a value may be attached (`-n2`) or follow (`-n 2`), long options take
+# `--name=VALUE` or `--name VALUE`. The first argument that is not an option,
+# or `--`, starts the command; everything after it belongs to the command.
 
-pub const DEFAULT_GREETING: string = "Hello";
+pub const DEFAULT_MAX_CHARS: int = 131072;
+pub const LIMIT_MAX_CHARS: int = 2097152;
 
 pub struct Options {
-    pub command: string;
-    pub operands: list[string];
-    pub help: bool;
-    pub version: bool;
-    pub verbose: bool;
-    pub shout: bool;
-    pub greeting: string;
+    pub var help: bool;
+    pub var version: bool;
+    # -0 / -d: the input delimiter, or "" for blank-separated, quoted input.
+    pub var delimited: bool;
+    pub var delimiter: string;
+    # -I: the string replaced by each input line in the initial arguments.
+    pub var replace: bool;
+    pub var replace_str: string;
+    # -n and -L (0: no limit), -s.
+    pub var max_args: int;
+    pub var max_lines: int;
+    pub var max_chars: int;
+    # -t and -r.
+    pub var verbose: bool;
+    pub var no_run_if_empty: bool;
+    pub var command: list[string];
+    # Warnings about options that cancel each other, printed by run().
+    pub var warnings: list[string];
 }
 
-pub func parse_args(argv: list[string]): Result[Options, string] {
-    var command = "";
-    var operands: list[string] = [];
-    var help = false;
-    var version = false;
-    var verbose = false;
-    var shout = false;
-    var greeting = DEFAULT_GREETING;
-    var only_operands = false;
+pub func default_options(): Options {
+    let none: list[string] = [];
+    return Options(help = false, version = false, delimited = false, delimiter = "",
+        replace = false, replace_str = "", max_args = 0, max_lines = 0,
+        max_chars = DEFAULT_MAX_CHARS, verbose = false, no_run_if_empty = false,
+        command = none, warnings = none);
+}
 
+func mutually_exclusive(first: string, second: string, ignored: string): string {
+    return "warning: options " + first + " and " + second
+        + " are mutually exclusive, ignoring previous " + ignored + " value";
+}
+
+# A positive decimal number for option `opt`.
+pub func parse_count(opt: string, text: string): Result[int, string] {
+    var digits = text;
+    var negative = false;
+    if (digits.startsWith("-") or digits.startsWith("+")) {
+        negative = digits.startsWith("-");
+        digits = digits.slice(1);
+    }
+    var ok = digits.len() > 0;
+    var value = 0;
+    for (ch in digits) {
+        let d = "0123456789".index_of(ch);
+        if (d < 0) {
+            ok = false;
+        } else if (value < 100000000000) {
+            value = value * 10 + d;
+        }
+    }
+    if (!ok) {
+        return Err("invalid number \"" + text + "\" for " + opt + " option");
+    }
+    if (negative) {
+        value = 0 - value;
+    }
+    if (value < 1) {
+        return Err(i"value {$ text $} for {$ opt $} option should be >= 1");
+    }
+    return Ok(value);
+}
+
+# The character a -d argument stands for: one character, or an escape such
+# as `\n`, `\t`, `\0`, `\\`, `\xHH` or `\NNN` (octal).
+pub func parse_delimiter(spec: string): Result[string, string] {
+    var chars: list[string] = [];
+    for (ch in spec) {
+        chars.push(ch);
+    }
+    if (chars.len() == 1) {
+        return Ok(spec);
+    }
+    if (chars.len() == 0 or chars[0] != "\\") {
+        return Err("Invalid input delimiter specification " + spec
+            + ": the delimiter must be either a single character or an escape sequence starting with \\.");
+    }
+    let rest = spec.slice(1);
+    if (chars.len() == 2) {
+        let simple = "\\abfnrtv";
+        let codes = [92, 7, 8, 12, 10, 13, 9, 11];
+        let k = simple.index_of(rest);
+        if (k >= 0) {
+            return Ok(str(char.of(codes[k])));
+        }
+    }
+    var value = 0;
+    var ok = true;
+    if (rest.startsWith("x") and rest.len() > 1) {
+        for (ch in rest.slice(1)) {
+            let d = "0123456789abcdef".index_of(ch.toLowerCase());
+            if (d < 0) {
+                ok = false;
+            } else {
+                value = value * 16 + d;
+            }
+        }
+    } else {
+        for (ch in rest) {
+            let d = "01234567".index_of(ch);
+            if (d < 0) {
+                ok = false;
+            } else {
+                value = value * 8 + d;
+            }
+        }
+    }
+    if (!ok or value > 255) {
+        return Err("Invalid escape sequence " + spec + " in input delimiter specification.");
+    }
+    return Ok(str(char.of(value)));
+}
+
+# Applies option `name` (a short letter or a long name) with `value`.
+func apply(edits opts: Options, name: string, value: string): Result[bool, string] {
+    if (name == "0" or name == "null") {
+        opts.delimited = true;
+        opts.delimiter = str(char.of(0));
+    } else if (name == "d" or name == "delimiter") {
+        opts.delimited = true;
+        opts.delimiter = parse_delimiter(value)?;
+    } else if (name == "t" or name == "verbose") {
+        opts.verbose = true;
+    } else if (name == "r" or name == "no-run-if-empty") {
+        opts.no_run_if_empty = true;
+    } else if (name == "n" or name == "max-args") {
+        if (opts.max_lines > 0) {
+            opts.warnings.push(mutually_exclusive("--max-lines", "--max-args/-n", "--max-lines"));
+            opts.max_lines = 0;
+        }
+        opts.max_args = parse_count("-n", value)?;
+    } else if (name == "L" or name == "max-lines") {
+        if (opts.replace) {
+            opts.warnings.push(mutually_exclusive("--replace", "-L", "--replace"));
+            opts.replace = false;
+        }
+        if (opts.max_args > 0) {
+            opts.warnings.push(mutually_exclusive("--max-args", "-L", "--max-args"));
+            opts.max_args = 0;
+        }
+        opts.max_lines = parse_count("-L", value)?;
+    } else if (name == "I") {
+        if (opts.max_lines > 0) {
+            opts.warnings.push(mutually_exclusive("--max-lines", "--replace/-I/-i", "--max-lines"));
+            opts.max_lines = 0;
+        }
+        if (opts.max_args > 0) {
+            opts.warnings.push(mutually_exclusive("--max-args", "--replace/-I/-i", "--max-args"));
+            opts.max_args = 0;
+        }
+        opts.replace = true;
+        opts.replace_str = value;
+    } else if (name == "s" or name == "max-chars") {
+        let size = parse_count("-s", value)?;
+        opts.max_chars = if (size > LIMIT_MAX_CHARS) { LIMIT_MAX_CHARS } else { size };
+    } else if (name == "help") {
+        opts.help = true;
+    } else if (name == "version") {
+        opts.version = true;
+    }
+    return Ok(true);
+}
+
+# Short options that take a value, and long options with and without one.
+const SHORT_WITH_VALUE: string = "dnLIs";
+const SHORT_FLAGS: string = "0tr";
+const LONG_WITH_VALUE: string = " delimiter max-args max-lines max-chars ";
+const LONG_FLAGS: string = " null verbose no-run-if-empty help version ";
+
+pub func parse_args(argv: list[string]): Result[Options, string] {
+    var opts = default_options();
     var i = 0;
     while (i < argv.len()) {
         let arg = argv[i];
-        i += 1;
-
-        if (only_operands or arg == "-" or !arg.startsWith("-")) {
-            if (command.is_empty()) {
-                command = arg;
-            } else {
-                operands.push(arg);
-            }
-            continue;
-        }
         if (arg == "--") {
-            only_operands = true;
-            continue;
+            i += 1;
+            break;
         }
-
-        # Split `--name=value` into its name and inline value.
-        var name = arg;
-        var inline_value: Option[string] = None;
-        if (arg.startsWith("--") and arg.contains("=")) {
-            let parts = arg.split("=");
-            name = parts[0];
-            inline_value = Some(parts.slice(1).join("="));
-        }
-
-        if (name == "-g" or name == "--greeting") {
-            match inline_value {
-                Some(v) => { greeting = v; },
-                None => {
-                    if (i >= argv.len()) {
-                        return Err(i"option '{$ name $}' requires a value");
-                    }
-                    greeting = argv[i];
-                    i += 1;
-                },
+        if (arg.startsWith("--")) {
+            var name = arg.slice(2);
+            var value = "";
+            var has_value = false;
+            let eq = name.index_of("=");
+            if (eq >= 0) {
+                value = name.slice(eq + 1);
+                name = name.slice(0, eq);
+                has_value = true;
             }
+            if (LONG_WITH_VALUE.index_of(" " + name + " ") >= 0) {
+                if (!has_value) {
+                    if (i + 1 >= argv.len()) {
+                        return Err("option '--" + name + "' requires an argument");
+                    }
+                    i += 1;
+                    value = argv[i];
+                }
+            } else if (LONG_FLAGS.index_of(" " + name + " ") >= 0) {
+                if (has_value) {
+                    return Err("option '--" + name + "' doesn't allow an argument");
+                }
+            } else {
+                return Err("unrecognized option '" + arg + "'");
+            }
+            apply(edits: opts, name, value)?;
+            i += 1;
             continue;
         }
-
-        if (inline_value.is_some()) {
-            return Err(i"option '{$ name $}' does not take a value");
+        if (!arg.startsWith("-") or arg == "-") {
+            break;
         }
-        if (name == "-h" or name == "--help") {
-            help = true;
-        } else if (name == "-V" or name == "--version") {
-            version = true;
-        } else if (name == "-v" or name == "--verbose") {
-            verbose = true;
-        } else if (name == "--shout") {
-            shout = true;
-        } else {
-            return Err(i"unknown option '{$ name $}'");
+        # A bundle of short options, the last of which may take a value.
+        var letters: list[string] = [];
+        for (ch in arg.slice(1)) {
+            letters.push(ch);
         }
+        var k = 0;
+        while (k < letters.len()) {
+            let letter = letters[k];
+            if (SHORT_WITH_VALUE.index_of(letter) >= 0) {
+                var value = "";
+                if (k + 1 < letters.len()) {
+                    value = letters.slice(k + 1).join("");
+                } else if (i + 1 < argv.len()) {
+                    i += 1;
+                    value = argv[i];
+                } else {
+                    return Err("option requires an argument -- '" + letter + "'");
+                }
+                apply(edits: opts, letter, value)?;
+                k = letters.len();
+            } else if (SHORT_FLAGS.index_of(letter) >= 0) {
+                apply(edits: opts, letter, "")?;
+                k += 1;
+            } else {
+                return Err("invalid option -- '" + letter + "'");
+            }
+        }
+        i += 1;
     }
-
-    return Ok(Options(
-        command = command,
-        operands = operands,
-        help = help,
-        version = version,
-        verbose = verbose,
-        shout = shout,
-        greeting = greeting,
-    ));
+    opts.command = argv.slice(i);
+    return Ok(opts);
 }
