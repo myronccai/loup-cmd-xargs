@@ -1,5 +1,13 @@
 @mode(host.dual)
 
+# Unit tests for xargs's command-line parsing (source/cli/args.loup):
+# bundled and attached values, long options, `--`, -I, the warnings for
+# options that cancel each other, counts and -d delimiters.
+#
+# Runtime: host.dual, run by the test runner: `make test` interprets this file
+# with Stage0 (`loup-bootstrap test`, source/ on LOUPPATH), one test per
+# `func test_*()`. It is not part of the binary.
+
 from debug.assert import (expect, expectEq);
 from cli.args import (parse_args, parse_count, parse_delimiter, DEFAULT_MAX_CHARS);
 

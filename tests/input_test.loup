@@ -1,5 +1,13 @@
 @mode(host.dual)
 
+# Unit tests for splitting input into arguments (source/commands/input.loup):
+# words and logical lines, quotes, unmatched quotes, -I lines and delimited
+# input.
+#
+# Runtime: host.dual, run by the test runner: `make test` interprets this file
+# with Stage0 (`loup-bootstrap test`, source/ on LOUPPATH), one test per
+# `func test_*()`. It is not part of the binary.
+
 from debug.assert import (expect, expectEq);
 from commands.input import (Input, read_words, read_lines, read_delimited, unmatched_quote,
     unquote_line, physical_lines);

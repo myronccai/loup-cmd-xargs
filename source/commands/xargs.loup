@@ -3,6 +3,19 @@
 # xargs: reads arguments from standard input, groups them into command lines
 # (`build_plan`, a pure function), and runs each command line in turn,
 # mapping the children's exit statuses to GNU xargs' own.
+#
+# Runtime: host.dual. Compiled into the native binary build/xargs by
+# `make build`; `make run` interprets the same code with Stage0. Children
+# are started with exec() through a `sh -c` wrapper that gives them
+# /dev/null as standard input. tests/xargs_test.loup checks only the pure
+# planning under Stage0 (`make test`); running commands is left to the e2e
+# tests (`make e2e`), because process-spawning unit tests were flaky under
+# the parallel test runner.
+#
+# Structure: planning (base_command, line_size, read_input, build_plan),
+# then running: locate and check_runnable find the command once,
+# with_null_stdin and run_command run one command line and map its status,
+# run_plan runs them all, and run_xargs ties input, plan and run together.
 
 from appinfo import (EXIT_OK, EXIT_FAILURE, EXIT_CHILD_FAILED, EXIT_CHILD_255,
     EXIT_CHILD_SIGNAL, EXIT_CANNOT_RUN, EXIT_NOT_FOUND);

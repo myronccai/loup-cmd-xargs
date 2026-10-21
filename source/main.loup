@@ -1,7 +1,16 @@
 @mode(host.dual)
 
-# Entry point. Keep this file thin: all behaviour lives in cli.app.run so
-# that tests can call it with an argument list.
+# xargs: entry point of the Loup recreation of GNU xargs. Keep this file
+# thin: all behaviour lives in cli.app.run so that tests can call it with an
+# argument list.
+#
+# Runtime: host.dual. The entry point: main() gets the command line. The same
+# source runs two ways: `make build` compiles it with the rest of source/
+# into the native binary build/xargs, which `make e2e` then tests, and
+# `make run` interprets it with Stage0 (`loup-bootstrap run
+# source/main.loup`). `make run` avoids the self-hosted `loup run`, which
+# joins a child's argv into a shell line without quoting and so breaks the
+# `sh -c` wrapper every command runs through.
 
 from cli.app import (run);
 

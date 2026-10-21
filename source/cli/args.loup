@@ -8,6 +8,15 @@
 # a value may be attached (`-n2`) or follow (`-n 2`), long options take
 # `--name=VALUE` or `--name VALUE`. The first argument that is not an option,
 # or `--`, starts the command; everything after it belongs to the command.
+#
+# Runtime: host.dual. Compiled into the native binary build/xargs by
+# `make build`; `make run` interprets the same code with Stage0, and
+# tests/args_test.loup exercises it under Stage0 (`make test`).
+#
+# Structure: value parsers (parse_count, parse_delimiter); apply(), the one
+# place that sets an option, so the GNU rules for options that cancel each
+# other (-n, -L, -I) and their warnings live together; then parse_args,
+# which only splits argv into option names and values and hands them on.
 
 pub const DEFAULT_MAX_CHARS: int = 131072;
 pub const LIMIT_MAX_CHARS: int = 2097152;

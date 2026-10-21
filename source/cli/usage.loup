@@ -1,5 +1,11 @@
 @mode(host.dual)
 
+# Help and version text for xargs: usage() is printed by --help,
+# version_line() by --version.
+#
+# Runtime: host.dual. Compiled into the native binary build/xargs by
+# `make build`; `make run` interprets the same code with Stage0.
+
 from appinfo import (APP_NAME, APP_VERSION);
 
 pub func usage(): string {

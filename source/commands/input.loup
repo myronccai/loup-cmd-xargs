@@ -8,6 +8,10 @@
 # - -I: each line is one argument; leading blanks are dropped and quotes are
 #   removed, but the blanks inside the line stay.
 # - -0 / -d: arguments end at the delimiter, taken literally (no quoting).
+#
+# Runtime: host.dual. Compiled into the native binary build/xargs by
+# `make build`; `make run` interprets the same code with Stage0, and
+# tests/input_test.loup exercises it under Stage0 (`make test`).
 
 from core.shlex import (split as shell_split);
 

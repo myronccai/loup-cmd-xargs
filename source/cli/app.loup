@@ -1,5 +1,13 @@
 @mode(host.dual)
 
+# The command-line driver of xargs: parses argv, answers --help and
+# --version, prints the option warnings, runs xargs and returns its exit
+# status.
+#
+# Runtime: host.dual. Compiled into the native binary build/xargs by
+# `make build`; `make run` interprets the same code with Stage0, and
+# tests/app_test.loup calls run() directly under Stage0 (`make test`).
+
 from appinfo import (APP_NAME, EXIT_OK, EXIT_FAILURE, EXIT_USAGE);
 from cli.args import (Options, parse_args);
 from cli.usage import (usage, version_line);
