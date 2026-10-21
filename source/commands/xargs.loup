@@ -12,9 +12,10 @@
 # tests (`make e2e`), because process-spawning unit tests were flaky under
 # the parallel test runner.
 #
-# Structure: planning (base_command, line_size, read_input, build_plan),
-# then running: locate and check_runnable find the command once,
-# with_null_stdin and run_command run one command line and map its status,
+# Structure: planning (base_command, line_size, read_input, build_plan,
+# whose nested start_command() closes one command line), then running:
+# locate and check_runnable find the command once, with_null_stdin and
+# run_command run one command line, child_status maps its exit code,
 # run_plan runs them all, and run_xargs ties input, plan and run together.
 
 from appinfo import (EXIT_OK, EXIT_FAILURE, EXIT_CHILD_FAILED, EXIT_CHILD_255,
@@ -25,14 +26,18 @@ from core.shlex import (join as shell_join);
 from io.fs import (isFile, isDir, exists);
 from io.proc import (exitCode);
 
+# The words of one command line. (Declared here: a `pub type` imported into
+# a module other than the entry file is unknown to Stage0 in Loup 1.26.0.)
+type CommandLine = list[string];
+
 # The command lines to run and the error that cut the list short, if any.
 pub struct Plan {
-    pub var commands: list[list[string]];
+    pub var commands: list[CommandLine];
     pub var error: string;
 }
 
 # The command given on the command line, or `echo`.
-pub func base_command(opts: Options): list[string] {
+pub func base_command(opts: Options): CommandLine {
     if (opts.command.len() == 0) {
         return ["echo"];
     }
@@ -41,7 +46,7 @@ pub func base_command(opts: Options): list[string] {
 
 # The size a command line counts against -s: each word and its terminating
 # NUL, in bytes.
-pub func line_size(argv: list[string]): int {
+pub func line_size(argv: CommandLine): int {
     var size = 0;
     for (w in argv) {
         size += w.byteLength() + 1;
@@ -78,8 +83,9 @@ pub func read_input(opts: Options, text: string): Input {
     return read_words(text);
 }
 
-func copy_words(words: list[string]): list[string] {
-    var out: list[string] = [];
+# A fresh list with the same words (command lines are filled in place).
+func copy_words(words: CommandLine): CommandLine {
+    var out: CommandLine = [];
     for (w in words) {
         out.push(w);
     }
@@ -94,7 +100,7 @@ func copy_words(words: list[string]): list[string] {
 # and never more than -s bytes per command line.
 pub func build_plan(opts: Options, input: Input): Plan {
     let base = base_command(opts);
-    var commands: list[list[string]] = [];
+    var commands: list[CommandLine] = [];
     let base_size = line_size(base);
     if (base_size > opts.max_chars) {
         return Plan(commands = commands, error = "cannot fit single argument within argument list size limit");
@@ -128,21 +134,35 @@ pub func build_plan(opts: Options, input: Input): Plan {
         return Plan(commands = commands, error = "");
     }
 
-    var current = copy_words(base);
+    # The command line being filled, its size in bytes, and how many
+    # arguments and input lines it holds so far. (The counter is not called
+    # `args`: `nonlocal args` binds to something else in the self-hosted
+    # interpreter and the native build of Loup 1.26.0.)
+    var current: CommandLine = copy_words(base);
     var size = base_size;
-    var args = 0;
+    var arg_count = 0;
     var lines = 0;
+    # Closes the current command line (-n, -L or -s says it is full, or the
+    # input ended) and starts a new one with the base command. The count of
+    # input lines for -L is left to the callers: a line filled up by -n
+    # does not restart it.
+    func start_command(): void {
+        nonlocal current;
+        nonlocal size;
+        nonlocal arg_count;
+        commands.push(current);
+        current = copy_words(base);
+        size = base_size;
+        arg_count = 0;
+    }
     for (line in input.lines) {
         for (item in line) {
             let item_size = item.byteLength() + 1;
             if (size + item_size > opts.max_chars) {
-                if (args == 0) {
+                if (arg_count == 0) {
                     return Plan(commands = commands, error = "argument line too long");
                 }
-                commands.push(current);
-                current = copy_words(base);
-                size = base_size;
-                args = 0;
+                start_command();
                 lines = 0;
                 if (size + item_size > opts.max_chars) {
                     return Plan(commands = commands, error = "argument line too long");
@@ -150,25 +170,19 @@ pub func build_plan(opts: Options, input: Input): Plan {
             }
             current.push(item);
             size += item_size;
-            args += 1;
-            if (opts.max_args > 0 and args == opts.max_args) {
-                commands.push(current);
-                current = copy_words(base);
-                size = base_size;
-                args = 0;
+            arg_count += 1;
+            if (opts.max_args > 0 and arg_count == opts.max_args) {
+                start_command();
             }
         }
         lines += 1;
-        if (opts.max_lines > 0 and lines == opts.max_lines and args > 0) {
-            commands.push(current);
-            current = copy_words(base);
-            size = base_size;
-            args = 0;
+        if (opts.max_lines > 0 and lines == opts.max_lines and arg_count > 0) {
+            start_command();
             lines = 0;
         }
     }
-    if (args > 0) {
-        commands.push(current);
+    if (arg_count > 0) {
+        start_command();
     }
     return Plan(commands = commands, error = "");
 }
@@ -212,18 +226,14 @@ pub func check_runnable(command: string): int {
 # The command line that runs `argv` with standard input from /dev/null, as
 # GNU xargs does (the runtime has no way to redirect a child's input, so a
 # shell does it and then replaces itself with the command).
-pub func with_null_stdin(argv: list[string]): list[string] {
-    var wrapped = ["sh", "-c", "exec \"$@\" < /dev/null", "sh"];
-    for (w in argv) {
-        wrapped.push(w);
-    }
-    return wrapped;
+pub func with_null_stdin(argv: CommandLine): CommandLine {
+    return ["sh", "-c", "exec \"$@\" < /dev/null", "sh"] + argv;
 }
 
 # Runs one command line, passing on its output. Returns 0 when it succeeded,
 # EXIT_CHILD_FAILED when it exited with 1-125 (xargs goes on), or the status
 # xargs stops with: 124 (exit 255) or 125 (killed by a signal).
-pub func run_command(argv: list[string]): int {
+pub func run_command(argv: CommandLine): int {
     let r = exec(with_null_stdin(argv));
     let code: int = r.exit_code;
     let out = r.stdout.to_string();
@@ -237,17 +247,19 @@ pub func run_command(argv: list[string]): int {
     if (err.len() > 0) {
         printErr(err);
     }
-    if (code == 255) {
-        return fail_to_run(argv[0], "exited with status 255; aborting", EXIT_CHILD_255);
-    }
-    if (code > 128 and code < 255) {
-        # The runtime reports death by signal N as 128 + N.
-        return fail_to_run(argv[0], i"terminated by signal {$ code - 128 $}", EXIT_CHILD_SIGNAL);
-    }
-    if (code != 0) {
-        return EXIT_CHILD_FAILED;
-    }
-    return EXIT_OK;
+    return child_status(argv[0], code);
+}
+
+# xargs' own status for a child's exit code: 0 stays 0, 255 and death by a
+# signal (the runtime reports signal N as 128 + N) stop xargs with 124 or
+# 125 and a message, and any other failure becomes 123 (xargs goes on).
+pub func child_status(command: string, code: int): int {
+    return match code {
+        0 => EXIT_OK,
+        255 => fail_to_run(command, "exited with status 255; aborting", EXIT_CHILD_255),
+        c if (c > 128) => fail_to_run(command, i"terminated by signal {$ c - 128 $}", EXIT_CHILD_SIGNAL),
+        _ => EXIT_CHILD_FAILED,
+    };
 }
 
 # Runs the planned command lines in order (printing each first with -t).

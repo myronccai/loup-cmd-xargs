@@ -12,7 +12,7 @@ from debug.assert import (expect, expectEq);
 from cli.args import (Options, parse_args);
 from commands.input import (Input);
 from commands.xargs import (Plan, build_plan, read_input, line_size, replace_all, base_command, locate,
-    with_null_stdin);
+    with_null_stdin, child_status);
 
 # The command lines xargs would run for `args` and `text`, one per entry.
 func plan_for(args: list[string], text: string): Plan {
@@ -87,4 +87,14 @@ func test_null_stdin_wrapper(): void {
     expectEq(wrapped.len(), 7, "sh -c SCRIPT sh ARGV...");
     expectEq(wrapped[2], "exec \"$@\" < /dev/null", "script");
     expectEq(wrapped[6], "a b", "arguments passed unchanged");
+}
+
+# A child's exit code as xargs' status. 255 and a signal (129 and up) also
+# print xargs' message on standard error.
+func test_child_status(): void {
+    expectEq(child_status("x", 0), 0, "success");
+    expectEq(child_status("x", 1), 123, "a failure: xargs goes on");
+    expectEq(child_status("x", 128), 123, "128 is not a signal");
+    expectEq(child_status("x", 143), 125, "killed by SIGTERM");
+    expectEq(child_status("x", 255), 124, "255 stops xargs");
 }
